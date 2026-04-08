@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#000000" />
   <title>Black Screen Recorder</title>
   <style>
     :root{
@@ -12,10 +15,11 @@
       --muted:rgba(255,255,255,.55);
       --text:#fff;
     }
-    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-    html,body{margin:0;height:100%;background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,Arial,sans-serif}
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+    html,body{margin:0;height:100%;background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,Arial,sans-serif;overflow:hidden}
+    body.noscroll{overflow:hidden;position:fixed;width:100%}
     .app{min-height:100dvh;background:radial-gradient(circle at top, rgba(255,255,255,.10), transparent 30%), #000;}
-    .shell{max-width:460px;margin:0 auto;min-height:100dvh;padding:20px 18px;display:flex;flex-direction:column}
+    .shell{max-width:460px;margin:0 auto;min-height:100dvh;padding:20px 18px calc(20px + env(safe-area-inset-bottom));display:flex;flex-direction:column}
     .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:34px}
     .eyebrow{font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:rgba(255,255,255,.4)}
     .title{font-size:24px;font-weight:600;margin-top:6px}
@@ -88,11 +92,18 @@
     .switch input:checked + .slider:before{transform:translateX(20px)}
     .countdown{
       position:fixed;inset:0;display:none;align-items:center;justify-content:center;
-      background:rgba(0,0,0,.45);font-size:78px;font-weight:700
+      background:rgba(0,0,0,.45);font-size:78px;font-weight:700;z-index:99
     }
     .countdown.show{display:flex}
-    .blackscreen{position:fixed;inset:0;background:#000;display:none}
+    .blackscreen{
+      position:fixed;inset:0;background:#000;display:none;z-index:100;
+      cursor:pointer;
+    }
     .blackscreen.show{display:block}
+    .hint{
+      position:fixed;left:50%;bottom:18px;transform:translateX(-50%);
+      color:rgba(255,255,255,.16);font-size:11px;letter-spacing:.06em;user-select:none
+    }
   </style>
 </head>
 <body>
@@ -132,7 +143,7 @@
   <div class="modal-wrap" id="settingsModal">
     <div class="modal">
       <h2>Settings</h2>
-      <div class="muted">These values are applied on the next recording.</div>
+      <div class="muted">MP4 is used when the browser supports it. Otherwise it falls back automatically.</div>
 
       <div class="field">
         <label for="quality">Quality</label>
@@ -183,17 +194,16 @@
   </div>
 
   <div class="countdown" id="countdown"></div>
-  <div class="blackscreen" id="blackscreen"></div>
+  <div class="blackscreen" id="blackscreen"><div class="hint"></div></div>
 
   <script>
-    const STORAGE_KEY = "stealth-recorder-settings-v1";
+    const STORAGE_KEY = "stealth-recorder-settings-v2";
     const defaultSettings = {
       quality: "1080p",
       fps: "30",
       zoom: 1,
       cameraMode: "environment",
-      includeAudio: true,
-      mimeType: "video/webm;codecs=vp9,opus"
+      includeAudio: true
     };
 
     const qualityMap = {
@@ -210,6 +220,7 @@
     let tapCount = 0;
     let tapTimer = null;
     let stopRequested = false;
+    let wakeLock = null;
 
     const openSettingsBtn = document.getElementById("openSettings");
     const settingsModal = document.getElementById("settingsModal");
@@ -264,18 +275,50 @@
       statusCard.classList.add("hidden");
     }
 
-    function getSupportedMimeType(preferred) {
-      const types = [
-        preferred,
-        "video/webm;codecs=vp9,opus",
-        "video/webm;codecs=vp8,opus",
-        "video/webm",
-        "video/mp4"
+    function getRecorderFormat() {
+      const preferred = [
+        { mimeType: "video/mp4;codecs=h264,aac", ext: "mp4" },
+        { mimeType: "video/mp4", ext: "mp4" },
+        { mimeType: "video/webm;codecs=vp9,opus", ext: "webm" },
+        { mimeType: "video/webm;codecs=vp8,opus", ext: "webm" },
+        { mimeType: "video/webm", ext: "webm" }
       ];
-      for (const t of types) {
-        if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
+
+      for (const item of preferred) {
+        try {
+          if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(item.mimeType)) {
+            return item;
+          }
+        } catch {}
       }
-      return "";
+      return { mimeType: "", ext: "webm" };
+    }
+
+    async function enterFullscreen() {
+      const el = document.documentElement;
+      try {
+        if (document.fullscreenElement) return true;
+        if (el.requestFullscreen) {
+          await el.requestFullscreen({ navigationUI: "hide" }).catch(() => el.requestFullscreen());
+          return true;
+        }
+      } catch {}
+      return false;
+    }
+
+    async function lockWake() {
+      try {
+        if ("wakeLock" in navigator) {
+          wakeLock = await navigator.wakeLock.request("screen");
+        }
+      } catch {}
+    }
+
+    async function releaseWake() {
+      try {
+        if (wakeLock) await wakeLock.release();
+      } catch {}
+      wakeLock = null;
     }
 
     async function applyZoom(track) {
@@ -332,6 +375,9 @@
       }
 
       try {
+        document.body.classList.add("noscroll");
+        await enterFullscreen();
+        await lockWake();
         await showCountdown();
 
         chunks = [];
@@ -340,8 +386,12 @@
 
         stream = await createStream();
 
-        const mimeType = getSupportedMimeType(settings.mimeType);
-        mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+        const recorderFormat = getRecorderFormat();
+        mediaRecorder = recorderFormat.mimeType
+          ? new MediaRecorder(stream, { mimeType: recorderFormat.mimeType })
+          : new MediaRecorder(stream);
+
+        mediaRecorder._ext = recorderFormat.ext;
 
         mediaRecorder.ondataavailable = (e) => {
           if (e.data && e.data.size > 0) chunks.push(e.data);
@@ -352,16 +402,20 @@
         mediaRecorder.onerror = () => {
           recording = false;
           blackscreen.classList.remove("show");
+          document.body.classList.remove("noscroll");
           setStatus("Recording failed. Try lower quality or FPS.", true);
           cleanupStream();
+          releaseWake();
         };
 
         mediaRecorder.start(1000);
         recording = true;
         blackscreen.classList.add("show");
       } catch (err) {
+        document.body.classList.remove("noscroll");
         setStatus(err?.message || "Could not access camera or microphone.", true);
         cleanupStream();
+        releaseWake();
       }
     }
 
@@ -370,6 +424,7 @@
       stopRequested = true;
       recording = false;
       blackscreen.classList.remove("show");
+      document.body.classList.remove("noscroll");
       try {
         if (mediaRecorder.state !== "inactive") {
           mediaRecorder.stop();
@@ -379,13 +434,14 @@
       } catch {
         finalizeRecording();
       }
+      await releaseWake();
     }
 
     function finalizeRecording() {
       try {
         const mimeType = mediaRecorder?.mimeType || "video/webm";
+        const extension = mediaRecorder?._ext || (mimeType.includes("mp4") ? "mp4" : "webm");
         const blob = new Blob(chunks, { type: mimeType });
-        const extension = mimeType.includes("mp4") ? "mp4" : "webm";
         const filename = "recording-" + new Date().toISOString().replace(/[:.]/g, "-") + "." + extension;
 
         if (blob.size > 0) {
